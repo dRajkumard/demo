@@ -1,0 +1,63 @@
+# Normalize line endings so Windows checkouts stay runnable inside Linux containers.
+#
+# Without this, a clone on a machine with core.autocrlf=true rewrites shell
+# scripts to CRLF. The container then reads the shebang as `#!/bin/sh\r`,
+# cannot find that interpreter, and the entrypoint dies with
+# "exec: ./docker-entrypoint.sh: not found" — a message that looks like a
+# missing file rather than a line-ending problem.
+
+* text=auto
+
+# Files executed inside containers MUST be LF, regardless of host platform.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Dockerfile.*    text eol=lf
+*.dockerfile    text eol=lf
+docker-entrypoint.sh text eol=lf
+entrypoint*.sh  text eol=lf
+
+# Keep container-bound config and robot description formats LF too.
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.urdf          text eol=lf
+*.sdf           text eol=lf
+*.xacro         text eol=lf
+
+# Windows-only scripts stay CRLF.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# Binary assets — never touch.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.gif           binary
+*.ico           binary
+*.woff          binary
+*.woff2         binary
+*.wasm          binary
+
+# ── Git LFS ──────────────────────────────────────────────────────────────────
+# Robot mesh assets and native binaries are large: the repo already carries 223 MB
+# across 11 blobs, the biggest a 61 MB COLLADA trunk mesh that trips GitHub's 50 MB
+# warning on every push.
+#
+# Scope is deliberately FORWARD-ONLY. The existing blobs live in main's history, and
+# rewriting that would change every commit hash and stop this branch being a
+# descendant of main. So these rules apply to newly added or modified files only;
+# migrating what is already committed needs a coordinated
+#   git lfs migrate import --include="*.dae,*.stl,*.node" --everything
+# run against main, agreed with everyone holding a clone.
+#
+# NOTE: this supersedes the earlier `*.dae text eol=lf` rule, and is strictly better
+# for it — LFS stores bytes verbatim, so the CRLF drift that had already corrupted
+# four checked-out .dae files cannot happen to LFS-tracked meshes at all.
+#
+# Anything cloning or building from LFS-tracked assets needs `git lfs install`, and
+# CI checkouts need `lfs: true`.
+*.dae           filter=lfs diff=lfs merge=lfs -text
+*.stl           filter=lfs diff=lfs merge=lfs -text
+*.glb           filter=lfs diff=lfs merge=lfs -text
+*.fbx           filter=lfs diff=lfs merge=lfs -text
+*.node          filter=lfs diff=lfs merge=lfs -text

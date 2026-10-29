@@ -1,0 +1,20 @@
+[submodule "apps/VanikaAi-Frontend"]
+	path = apps/VanikaAi-Frontend
+	url = https://github.com/vanika-ai10/VanikaAi-Frontend.git
+	branch = development
+[submodule "services/ai-proxy"]
+	path = services/ai-proxy
+	url = https://github.com/vanika-ai10/ai-proxy.git
+	branch = development
+[submodule "services/srm-service"]
+	path = services/srm-service
+	url = https://github.com/vanika-ai10/srm-service.git
+	branch = development
+[submodule "services/sim-worker"]
+	path = services/sim-worker
+	url = https://github.com/vanika-ai10/sim-worker.git
+	branch = development
+[submodule "services/Gateway-Service"]
+	path = services/Gateway-Service
+	url = https://github.com/vanika-ai10/Gateway-Service.git
+	branch = development

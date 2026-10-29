@@ -1,0 +1,38 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+# The .env.docker rule below was previously commented out, so the file was
+# committed in c2309c7 carrying a live Supabase service-role key (which bypasses
+# row-level security) plus five LLM provider keys. Untracking it does NOT undo
+# that exposure — those credentials remain in git history and must be rotated.
+.env
+.env.local
+# .env.docker
+.env.*.local
+*.env.docker
+.DS_Store
+
+# ── Local docs and PDFs — kept out of the repo ───────────────────────────────
+docs/
+*.pdf
+
+# ── Generated artefacts ──────────────────────────────────────────────────────
+# Knowledge-graph output: ~15 MB of caches and exports, fully reproducible from
+# the source tree, so it is regenerated rather than versioned.
+graphify-out/
+
+# Local agent tooling — installed per-developer, not part of the application.
+.agents/
+
+# Playwright run output (traces, screenshots, last-run state).
+apps/VanikaAi-Frontend/test-results/
+apps/VanikaAi-Frontend/playwright-report/
+apps/VanikaAi-Frontend/e2e-results.json
+
+# Claude Code tooling artifacts
+skills-lock.json
+
+# Stray model/config dumps that land in the working tree; not project files
+claude-*.md
+
+# Python bytecode
+__pycache__/
+*.pyc

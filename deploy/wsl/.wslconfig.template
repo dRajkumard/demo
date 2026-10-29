@@ -1,0 +1,55 @@
+# WSL2 settings for running Vanika on Windows.
+#
+# Copy to %USERPROFILE%\.wslconfig, then run `wsl --shutdown` and start Docker
+# Desktop again. The installer does this for you.
+#
+# WHY THIS FILE EXISTS
+#
+# Without it, WSL2 grows its virtual machine to hold Linux page cache and does
+# not give that memory back to Windows. On a machine running this stack that
+# shows up as VmmemWSL holding 11 GB while the containers themselves use under
+# one -- the difference is cache, not the application. Task Manager reports the
+# VM's total, so it looks like the app is enormous when it is not.
+#
+# The three settings that matter:
+#   memory            a hard ceiling on the VM, so it can never take the machine
+#   autoMemoryReclaim  hands cached memory back to Windows as it goes idle
+#                      (requires WSL 2.0+; check with `wsl --version`)
+#   sparseVhd         lets the virtual disk shrink when you delete images
+#
+# TUNING
+#
+# The values below suit a 16 GB machine. On 32 GB use memory=12GB and
+# processors=12; on 8 GB use memory=5GB and processors=4. Keep at least 4 GB for
+# Windows itself. The whole stack idles at roughly 1 GB, so a 8 GB ceiling
+# leaves ample room for builds and simulation.
+
+[wsl2]
+# A ceiling, not a reservation: WSL only takes what it needs, up to this.
+memory=8GB
+
+# Not all 24 cores. Docker builds will use every core it is given, which is what
+# makes the machine unusable while a build runs.
+processors=8
+
+# Small, and on disk rather than in the VM's own memory.
+swap=2GB
+
+# The setting that actually fixes VmmemWSL growing without bound. "gradual"
+# returns cache after it has been idle for a while; "dropcache" is more
+# aggressive and can cost I/O performance.
+autoMemoryReclaim=gradual
+
+# Reclaim disk space when images and build cache are pruned. Without this the
+# ext4.vhdx only ever grows.
+sparseVhd=true
+
+# Keep the networking default; mirrored mode breaks container port publishing on
+# some setups and is not needed here.
+networkingMode=NAT
+
+[experimental]
+# Same reclaim setting under its older key, so this file works on both WSL 2.0
+# and 2.1+ without editing.
+autoMemoryReclaim=gradual
+sparseVhd=true

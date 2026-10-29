@@ -1,0 +1,61 @@
+# Secret-scanning config for gitleaks (CI job + optional pre-commit hook).
+#
+# Motivated by a real incident in this repo: .gitignore line 3 read `# .env.docker`
+# — commented out — so the file was committed in c2309c7 carrying a live Supabase
+# service-role key (which bypasses row-level security) plus Anthropic, Mistral, Groq,
+# Moonshot and OpenAI keys. A single commented-out line defeated the only control in
+# place. A scanner catches that class of mistake; code review generally does not.
+
+title = "VanikaAI secret scanning"
+
+[extend]
+useDefault = true   # keep gitleaks' built-in provider rules (AWS, GitHub, Stripe, ...)
+
+# ---------------------------------------------------------------- custom rules ----
+
+[[rules]]
+id = "supabase-service-role-key"
+description = "Supabase service-role key (bypasses RLS entirely)"
+regex = '''(?i)(supabase[_-]?service[_-]?role[_-]?key|SUPABASE_SERVICE_ROLE_KEY)\s*[:=]\s*['"]?(eyJ[A-Za-z0-9_\-\.]{30,}|sb_secret_[A-Za-z0-9_\-]{20,})'''
+tags = ["supabase", "critical"]
+
+[[rules]]
+id = "llm-provider-key"
+description = "LLM provider API key (Anthropic / OpenAI / Mistral / Groq / Moonshot)"
+regex = '''(?i)(ANTHROPIC|OPENAI|MISTRAL|GROQ|MOONSHOT)_API_KEY\s*[:=]\s*['"]?(sk-[A-Za-z0-9_\-]{20,}|gsk_[A-Za-z0-9]{20,}|[A-Za-z0-9]{32,})'''
+tags = ["llm", "critical"]
+
+[[rules]]
+id = "committed-env-file"
+description = "Any assignment that looks like a populated secret in a tracked .env file"
+# gitleaks uses Go RE2, which has no negative lookahead — match every .env* file and
+# let the allowlist below exclude the templates.
+path = '''(^|/)\.env(\.[A-Za-z0-9_.-]+)?$'''
+regex = '''(?i)^[A-Z0-9_]*(KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*=\s*\S{8,}'''
+tags = ["env", "critical"]
+
+# ---------------------------------------------------------------- allowlist -------
+
+[allowlist]
+description = "Templates, fixtures and lockfiles — placeholders, not real credentials"
+paths = [
+  '''\.env\.docker\.example$''',
+  '''(^|/)README\.md$''',
+  '''(^|/)package-lock\.json$''',
+  '''(^|/)pnpm-lock\.yaml$''',
+  '''(^|/)graphify-out/''',
+  '''(^|/)services/srm-service/generated/''',
+]
+regexes = [
+  '''your-project\.supabase\.co''',
+  '''sk-ant-\.\.\.''',
+  '''<redacted>''',
+  '''changeme''',
+  # Test fixtures for the bring-your-own-key store. These are placeholders in
+  # unit tests that never reach a network: the two literals below were committed
+  # before the FAKE- convention existed and stay allowlisted because the scanner
+  # reads history, and anything matching FAKE-... is allowlisted going forward.
+  '''sk-ant-xxx''',
+  '''sk-proj-abc123DEF456ghi789''',
+  '''FAKE-[A-Z0-9-]+''',
+]
