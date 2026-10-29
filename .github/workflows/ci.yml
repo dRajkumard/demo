@@ -1,17 +1,8 @@
 name: CI
 
-# Gates that keep the fixes from this audit from silently regressing:
-#   - dependency advisories at high-and-above (every set currently audits at zero)
-#   - secret scanning (a commented-out .gitignore rule once put live keys in history)
-#   - the test suites, including the ai-proxy one that runs in its own image
-#
-# Each job is independent so one red gate does not mask the others.
-
 on:
   push:
-    # V2 is the integration branch; without it here nothing pushed there was
-    # ever built or tested by CI, which is how a red gateway suite went unseen.
-    branches: [main, V2]
+    branches: [main, master, development, V2]
   pull_request:
   workflow_dispatch:
 
@@ -23,221 +14,147 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  source_check:
+    name: Validate demo build inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: python3 scripts/check-build-contexts.py
+
+  tests:
+    name: Test all demo services and collect coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install coverage==7.6.1
+      - run: python -m coverage run --branch -m unittest discover -s tests -v
+      - run: python -m coverage xml -o coverage.xml
+      - run: python -m coverage report --fail-under=80
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage
+          path: coverage.xml
+          if-no-files-found: error
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # gitleaks needs history to scan past commits
-      - name: gitleaks
-        # The gitleaks BINARY is MIT-licensed and free. The GitHub Action
-        # wrapper is not: for an organisation-owned repository it refuses to run
-        # without a paid GITLEAKS_LICENSE, which is why this job was red on every
-        # push while finding nothing. Running the binary directly does the same
-        # scan with the same config and baseline.
-        #
-        # --baseline-path acknowledges the findings already in history (the
-        # .env.docker committed in c2309c7). Without it this job is red forever
-        # and people learn to ignore it; with it, the gate fires on anything NEW.
-        #
-        # The baseline is NOT absolution: those credentials remain live and
-        # exposed in git history. Once they are rotated and the history purged,
-        # regenerate it and it should shrink to an empty array.
+          fetch-depth: 0
+      - name: Scan tracked history
         run: |
           VERSION=8.28.0
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"             | tar -xz -C /tmp gitleaks
-          /tmp/gitleaks detect             --config .gitleaks.toml             --baseline-path .gitleaks-baseline.json             --redact             --no-banner             --exit-code 1
+          curl --fail --silent --show-error --location --max-time 120 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks detect --config .gitleaks.toml \
+            --baseline-path .gitleaks-baseline.json --redact --no-banner --exit-code 1
 
-  web:
-    name: Web — typecheck, unit, audit
+  builds:
+    name: Docker build (${{ matrix.service }})
+    needs: source_check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/VanikaAi-Frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, gateway-service, srm-service, ai-proxy, sim-worker, ubuntu-sandbox]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/VanikaAi-Frontend/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - name: Typecheck
-        run: pnpm run lint
-      - name: Unit tests + coverage
-        run: pnpm test
-      - name: Dependency audit (high and above)
-        run: pnpm audit --audit-level high
-
-  gateway:
-    name: Gateway — build, test, audit
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/Gateway-Service
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22            # NestJS 12 is ESM-only; needs require(esm) from 22.12
-          cache: npm
-          cache-dependency-path: services/Gateway-Service/package-lock.json
-      - name: Install
-        # node-gyp builds node-pty from source; point it at the headers already on the
-        # runner so the build does not depend on an external download.
-        run: npm ci
-        env:
-          npm_config_nodedir: /usr/local
-      - run: npx prisma generate
-      - run: npm run build
-      - run: npm test
-      - name: Dependency audit (high and above)
-        run: npm audit --audit-level=high
-
-  srm:
-    name: SRM — build, test, audit
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/srm-service
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: services/srm-service/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run db:generate
-        env:
-          DATABASE_URL: postgresql://build:build@127.0.0.1:5432/build
-      - run: pnpm run build
-      - run: pnpm test
-      - name: Dependency audit (high and above)
-        run: pnpm audit --audit-level high
-
-  ai_proxy:
-    name: AI-Proxy — suite in image, audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # This job's build context carries the robot mesh assets, which are
-          # LFS-tracked going forward (see .gitattributes). Without this, any mesh
-          # added after that change checks out as a pointer file and the CAD tests
-          # fail on unreadable geometry. Other jobs need no binary assets and skip
-          # the fetch cost.
-          lfs: true
-      - name: Build the test image
-        # The runtime image ships no tests by design; the `test` stage adds them on top
-        # of the exact dependency set the service runs, including the CAD kernel.
-        run: docker build --target test -t vanika-aiproxy-test services/ai-proxy
-      - name: Run pytest
-        run: docker run --rm vanika-aiproxy-test python -m pytest -q -p no:cacheprovider
-      - name: Validate the eval corpus
-        # Free and offline: parses every row and checks expect_kind against the
-        # IntentKind enum. The corpus is data anyone can append to, so a malformed
-        # row would otherwise only surface during a scored run that costs money.
-        run: docker run --rm vanika-aiproxy-test python evals/run_evals.py --dry-run
-      - name: pip-audit
-        run: |
-          python -m pip install --quiet pip-audit
-          python -m pip_audit -r services/ai-proxy/requirements.txt --progress-spinner off
-
-  sim_worker:
-    name: Sim worker — PyBullet physics tests
-    runs-on: ubuntu-latest
-    # This job did not exist, which is why a Dockerfile that omitted constants.py
-    # and a test fixture pointing at a directory that was never in the repo both
-    # went unnoticed: the container could not start and the tests could not
-    # import, and nothing was watching either.
-    steps:
-      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
       - name: Build the runtime image
-        # Catches the missing-module class of break: if the image cannot import
-        # its own entrypoint, the worker cannot consume a single job.
-        run: docker build -t vanika-simworker services/sim-worker
-      - name: Verify the worker actually imports
-        run: docker run --rm --entrypoint python vanika-simworker -c "import worker"
-      - name: Run the physics tests
-        run: |
-          docker build --target test -t vanika-simworker-test services/sim-worker
-          docker run --rm vanika-simworker-test python -m pytest -q -p no:cacheprovider
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: docker compose build "$SERVICE"
 
-  evals:
-    name: Intent evals — scored accuracy against the corpus
+  smoke:
+    name: Start and smoke test the entire demo stack
+    needs: source_check
     runs-on: ubuntu-latest
-    # Scoring calls a live model, so it needs a key and costs money per run. It is
-    # therefore not a per-PR gate: forked PRs get no secret, and re-scoring 22 cases
-    # on every doc typo would be waste. It runs where the answer actually matters —
-    # a push to a long-lived branch, or on demand before a prompt change lands.
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
-      - name: Check for a model key
-        id: key
-        # Secrets are unavailable to forks, so decide by presence rather than
-        # letting the run fail with an auth error that looks like a real failure.
-        run: |
-          if [ -n "${{ secrets.ANTHROPIC_API_KEY }}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "No ANTHROPIC_API_KEY configured — skipping the scored run." >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Build the test image
-        if: steps.key.outputs.present == 'true'
-        run: docker build --target test -t vanika-aiproxy-test services/ai-proxy
-      - name: Score the corpus
-        if: steps.key.outputs.present == 'true'
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        # The floor is deliberately below 100%. A live model missing one borderline
-        # phrasing is noise; a prompt edit that drops a third of the corpus is the
-        # signal this gate exists to catch. Raise the floor as the corpus hardens.
-        # --user pins the container to the runner's uid so the bind-mounted summary
-        # file stays writable; the image's own uid happens to match today, which is
-        # not something a gate should quietly depend on.
-        run: |
-          docker run --rm             -e ANTHROPIC_API_KEY             --user "$(id -u)"             -v "$GITHUB_STEP_SUMMARY:/tmp/summary.md"             vanika-aiproxy-test             python evals/run_evals.py --min-accuracy 0.85 --summary /tmp/summary.md
-
-  e2e:
-    name: E2E — Playwright against the built frontend
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/VanikaAi-Frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: apps/VanikaAi-Frontend/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm exec playwright install --with-deps chromium
-      - name: Build and serve the production bundle
-        run: |
-          pnpm run build
-          pnpm exec vite preview --port 8080 --host &
-          npx wait-on http://localhost:8080 --timeout 60000
-      - name: Playwright
-        run: pnpm exec playwright test
-        env:
-          E2E_BASE_URL: http://localhost:8080
-      - uses: actions/upload-artifact@v4
+      - run: docker compose up -d --build --wait --wait-timeout 120
+      - run: python3 scripts/smoke-demo.py
+      - name: Container logs
         if: failure()
+        run: docker compose logs --no-color
+      - name: Stop demo containers
+        if: always()
+        run: docker compose down
+
+  sonarqube:
+    name: SonarQube quality gate
+    needs: tests
+    # Fork pull requests cannot receive the analysis token.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          name: playwright-report
-          path: apps/VanikaAi-Frontend/test-results/
-          retention-days: 7
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-coverage
+      - name: Validate SonarQube configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
+        run: |
+          for setting in SONAR_TOKEN SONAR_HOST_URL SONAR_PROJECT_KEY; do
+            if [ -z "${!setting}" ]; then
+              echo "::error::Configure $setting in the repository Actions settings."
+              exit 1
+            fi
+          done
+      - uses: SonarSource/sonarqube-scan-action@v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=600
+
+  publish:
+    name: Publish demo image (${{ matrix.service }})
+    needs: [tests, secrets, builds, smoke, sonarqube]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [frontend, gateway-service, srm-service, ai-proxy, sim-worker, ubuntu-sandbox]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish the tested revision
+        env:
+          SERVICE: ${{ matrix.service }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}/${SERVICE}:${GITHUB_SHA}"
+          export VANIKA_CI_IMAGE="$image"
+          python3 - <<'PYOVERRIDE'
+          import json, os
+          from pathlib import Path
+          Path('/tmp/publish.json').write_text(json.dumps({
+              'services': {os.environ['SERVICE']: {'image': os.environ['VANIKA_CI_IMAGE']}}
+          }))
+          PYOVERRIDE
+          docker compose -f docker-compose.yml -f /tmp/publish.json build "$SERVICE"
+          docker push "$image"

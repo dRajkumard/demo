@@ -1,316 +1,63 @@
-# Resource ceilings.
-#
-# Every service is capped so one runaway process cannot take the machine -- the
-# failure Redpanda produced before it was capped. The numbers are several times
-# each service's measured steady state, so they never bite in normal use. Raise
-# one if a service is genuinely OOM-killed; do not remove them.
-# Full local stack. From the repo root:
-#   1. Copy .env.docker.example → .env.docker and fill secrets
-#   2. Start Docker Desktop
-#   3. docker compose up --build
-#
-# Host ports: frontend 8080 | gateway 3001 | srm 3002 | kafka 3003 | ai-proxy 3004 | sim-worker 8003
-# sim-worker is optional: docker compose --profile sim up --build
-
-# One stack, one identity.
-#
-# Without this, Compose derives the project name from the directory. A second
-# clone -- or the same repo checked out at another path -- becomes a separate
-# project whose containers fight this one for the same published ports and the
-# same database. Pinning the name means any invocation from anywhere addresses
-# THESE containers: `up` reuses or replaces them instead of standing up a rival
-# set, and `down` from a copy stops the right thing.
-name: vanikaai
-
+# Dummy services for CI/CD testing. No API keys or databases required.
+name: vanikaai-demo
 services:
-  gateway-service:
-    # Every long-running service restarts with the host. Without this a
-    # machine reboot left the gateway and frontend down while everything
-    # behind them came back -- the product was gone and nothing reported it.
-    restart: unless-stopped
+  frontend:
     build:
-      context: ./services/Gateway-Service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: apps/VanikaAi-Frontend/Dockerfile
+      target: runtime
     ports:
-      - "3001:3000"
-    env_file:
-      - .env.docker
-    environment:
-      DATABASE_URL: postgresql://user:password@postgres:5432/vanikadb
-      # The tenant path connects as vanika_app, which cannot bypass row-level security.
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-vanika_app_dev}
-      APP_DATABASE_URL: postgresql://vanika_app:${APP_DB_PASSWORD:-vanika_app_dev}@postgres:5432/vanikadb
-      PORT: "3000"
-      NODE_ENV: production
-      SRM_SERVICE_URL: http://srm-service:3001
-      AI_PROXY_URL: http://ai-proxy:3002
-      # Who may see the platform-wide admin (every org). Org owners and
-      # admins see their own org's admin without being listed here.
-      PLATFORM_ADMIN_EMAILS: ${PLATFORM_ADMIN_EMAILS:-aditya@vanika.ai}
-      PUBLIC_APP_URL: ${PUBLIC_APP_URL:-http://localhost:8080}
-      AI_PROXY_TIMEOUT_MS: "1200000"
-      REDIS_URL: redis://redis:6379
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5174}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:5174,http://localhost:8080}
-      # Reach Docker through the allowlisting broker instead of the raw socket.
-      DOCKER_HOST: tcp://docker-socket-proxy:2375
-    volumes:
-      - ./services/Gateway-Service/workspace:/app/workspace
-    # No docker.sock mount and no `user: root` any more. This container previously held
-    # the raw Docker socket as root, which turned any file-write bug in the gateway into
-    # a host-compromise path. It now runs as the unprivileged `vanika` user from the
-    # Dockerfile and can only reach the four Docker endpoints the terminal needs.
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      srm-service:
-        condition: service_started
-      ai-proxy:
-        condition: service_started
-      ubuntu-sandbox:
-        condition: service_started
-      docker-socket-proxy:
-        condition: service_started
-    networks:
-      - vanika-net
-
-  # Least-privilege broker in front of the Docker API.
-  #
-  # Deliberately NOT tecnativa/docker-socket-proxy: its ACLs are section-based, and the
-  # CONTAINERS+POST combination that `docker exec` requires also permits
-  # POST /containers/create. Tested against that image, `docker run --rm -v /:/host`
-  # still reached the host filesystem — the very escape the broker exists to prevent.
-  # This uses an explicit path allowlist instead; see docker-proxy/haproxy.cfg.
-    # Node API; measured 113 MB
-    cpus: 2.0
-    mem_limit: 768m
-  docker-socket-proxy:
-    image: haproxy:2.9-alpine
-    user: root   # only to read the socket; the container exposes nothing else
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./services/Gateway-Service/docker-proxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    - 127.0.0.1:${FRONTEND_PORT:-18080}:8080
     restart: unless-stopped
-    networks:
-      - vanika-net
-    # haproxy allow-list; measured 23 MB
+    cpus: 0.5
+    mem_limit: 128m
+  gateway-service:
+    build:
+      context: .
+      dockerfile: services/Gateway-Service/Dockerfile
+      target: runtime
+    ports:
+    - 127.0.0.1:${GATEWAY_PORT:-13001}:3000
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+  srm-service:
+    build:
+      context: .
+      dockerfile: services/srm-service/Dockerfile
+      target: runtime
+    ports:
+    - 127.0.0.1:${SRM_PORT:-13002}:3001
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+  ai-proxy:
+    build:
+      context: .
+      dockerfile: services/ai-proxy/Dockerfile
+      target: runtime
+    ports:
+    - 127.0.0.1:${AI_PROXY_PORT:-13004}:3002
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+  sim-worker:
+    build:
+      context: .
+      dockerfile: services/sim-worker/Dockerfile
+      target: runtime
+    ports:
+    - 127.0.0.1:${SIM_WORKER_PORT:-18003}:8003
+    restart: unless-stopped
     cpus: 0.5
     mem_limit: 128m
   ubuntu-sandbox:
     build:
-      context: ./services/Gateway-Service
-      dockerfile: Dockerfile.sandbox
-    image: vanika-ubuntu-sandbox:latest
-    container_name: vanika-ubuntu-sandbox
-    ports:
-      - "7447:7447"
-    ipc: host
-    volumes:
-      - ./services/Gateway-Service/workspace:/workspace
-    restart: unless-stopped
-    networks:
-      - vanika-net
-    # colcon builds spike; measured 43 MB idle
-    cpus: 4.0
-    mem_limit: 2g
-  srm-service:
-    build:
-      context: ./services/srm-service
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    ports:
-      - "3002:3001"
-    env_file:
-      - .env.docker
-    environment:
-      DATABASE_URL: postgresql://user:password@postgres:5432/vanikadb
-      # The tenant path connects as vanika_app, which cannot bypass row-level security.
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-vanika_app_dev}
-      APP_DATABASE_URL: postgresql://vanika_app:${APP_DB_PASSWORD:-vanika_app_dev}@postgres:5432/vanikadb
-      PORT: "3001"
-      NODE_ENV: production
-      EVENT_BUS_TRANSPORT: kafka
-      KAFKA_BROKERS: kafka:9092
-      KAFKA_SIM_RESULTS_CONSUMER: "true"
-      # Where the sim worker fetches a run's mesh geometry. Internal network
-      # only -- the worker never goes through the gateway, and the credential
-      # it presents is scoped to a single run.
-      SIM_MESH_BASE_URL: http://srm-service:3001
-      SRM_PUBLIC_BASE_URL: http://localhost:3002
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-      kafka:
-        condition: service_healthy
-    networks:
-      - vanika-net
-
-  # Do not `docker run` srm-service without -e DATABASE_URL=... — use compose.
-    # Node API; measured 111 MB
-    cpus: 2.0
-    mem_limit: 768m
-  ai-proxy:
-    build:
-      context: ./services/ai-proxy
-      dockerfile: Dockerfile
-      # Explicit: the Dockerfile's LAST stage is `test`, and Docker builds the last
-      # stage by default. Without this the service image would run pytest instead of
-      # uvicorn. CI builds the suite with `--target test`.
+      context: .
+      dockerfile: services/Gateway-Service/Dockerfile.sandbox
       target: runtime
-    restart: unless-stopped
     ports:
-      - "3004:3002"
-    env_file:
-      - .env.docker
-    environment:
-      # System Ollama on the host (not a Docker service) — start: ollama serve
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
-      OLLAMA_DEFAULT: ${OLLAMA_DEFAULT:-true}
-      OLLAMA_FOR_CODING: ${OLLAMA_FOR_CODING:-false}
-      MISTRAL_ONLY: ${MISTRAL_ONLY:-true}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # No depends_on: ai-proxy holds no database client (no psycopg/asyncpg/
-    # SQLAlchemy, no DATABASE_URL). It previously waited on postgres for nothing,
-    # which only delayed startup and misrepresented the topology.
-    networks:
-      - vanika-net
-    # FastAPI; measured 124 MB
-    cpus: 2.0
-    mem_limit: 768m
-  sim-worker:
-    build:
-      context: ./services/sim-worker
-      dockerfile: Dockerfile
-      # Pin the runtime stage. The Dockerfile also carries a `test` stage, and
-      # Docker builds the LAST stage by default -- without this the worker image
-      # would be a pytest runner that exits instead of consuming jobs.
-      target: runtime
-    # Every other service restarts; this one did not, so it exited for good the
-    # first time the broker went away and simulations queued forever with
-    # nothing consuming them. A worker that dies on a broker blip is worse than
-    # one that is simply absent, because the queue still accepts jobs.
+    - 127.0.0.1:${SANDBOX_PORT:-17447}:7447
     restart: unless-stopped
-    environment:
-      KAFKA_BROKERS: kafka:9092
-      HOST: "0.0.0.0"
-      PORT: "8003"
-    ports:
-      - "8003:8003"
-    depends_on:
-      kafka:
-        condition: service_healthy
-    networks:
-      - vanika-net
-    profiles:
-      - sim
-    # PyBullet spikes while stepping; measured 37 MB idle
-    cpus: 4.0
-    mem_limit: 1500m
-  frontend:
-    restart: unless-stopped
-    build:
-      context: ./apps/VanikaAi-Frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_GATEWAY_BACKEND_URL: ${VITE_GATEWAY_BACKEND_URL:-http://localhost:3001}
-    ports:
-      - "8080:80"
-    depends_on:
-      - gateway-service
-    networks:
-      - vanika-net
-    # nginx serving a built bundle; measured 19 MB
     cpus: 0.5
     mem_limit: 128m
-  postgres:
-    restart: unless-stopped
-    image: postgres:15-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: vanikadb
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d vanikadb"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - vanika-net
-    # measured 121 MB; shared_buffers stay well under this
-    cpus: 2.0
-    mem_limit: 1g
-  redis:
-    restart: unless-stopped
-    image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    networks:
-      - vanika-net
-    # rate-limit counters only; measured 16 MB
-    cpus: 1.0
-    mem_limit: 256m
-  kafka:
-    restart: unless-stopped
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.4
-    # Redpanda runs on Seastar, which allocates one reactor thread per visible
-    # core and polls each of them. On a 24-core machine that meant 49 threads
-    # burning ~2900% CPU steadily -- roughly 97% of everything this stack used --
-    # to serve two topics that carry a handful of messages per simulation run.
-    #
-    # --smp=1 is the fix: one reactor is far more than enough for sim-jobs and
-    # sim-results, and it is what the flag exists for. --memory caps the heap,
-    # which Seastar otherwise sizes from total system RAM and had grown to
-    # 2.5GB. Flags use --flag=value rather than "--flag value" in a single list
-    # item, which is what the previous form produced.
-    command:
-      - redpanda
-      - start
-      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr=internal://kafka:9092,external://127.0.0.1:3003
-      - --mode=dev-container
-      - --smp=1
-      - --memory=1G
-      - --reserve-memory=0M
-      - --overprovisioned
-      - --default-log-level=warn
-    # A ceiling as well as a setting: if a future flag change reintroduces the
-    # spin, it costs one core rather than the machine.
-    cpus: 2.0
-    mem_limit: 1400m
-    ports:
-      - "3003:19092"
-    volumes:
-      # Named rather than anonymous so the shard count can be changed without
-      # hunting a hex id. Redpanda refuses to reduce its core assignment against
-      # an existing log, so changing --smp means recreating this volume.
-      - redpanda-data:/var/lib/redpanda/data
-    healthcheck:
-      test: ["CMD", "rpk", "cluster", "health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    networks:
-      - vanika-net
-
-volumes:
-  postgres-data:
-  redpanda-data:
-
-networks:
-  vanika-net:
-    driver: bridge

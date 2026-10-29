@@ -36,3 +36,9 @@ claude-*.md
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Demo test coverage
+.coverage
+coverage.xml
+htmlcov/
+.venv/
