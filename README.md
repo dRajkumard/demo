@@ -41,15 +41,14 @@ docker compose down
 python3 -m unittest discover -s tests -v
 ```
 
-## GitHub Actions and SonarQube
+## GitHub Actions
 
 The workflow validates sources, runs HTTP tests with coverage, builds all six
-images, starts the entire demo stack, runs smoke checks and scans with SonarQube.
-After all checks pass on main, it publishes commit tagged images to GHCR.
-
-For SonarQube, configure the Actions secret `SONAR_TOKEN` and repository variables
-`SONAR_HOST_URL` and `SONAR_PROJECT_KEY`. See [CI/CD setup](deploy/CI-CD.md).
-Missing settings fail the SonarQube job. No deployment to a server is configured.
+images, starts the entire demo stack and runs smoke checks.
+After all checks pass on main, it publishes commit tagged images to AWS ECR and deploys them to EC2 through
+AWS Systems Manager.
+SonarQube is not required by CI. Configure AWS before pushing to main; see
+[AWS EC2 setup](deploy/AWS-EC2.md) and [CI/CD setup](deploy/CI-CD.md).
 
 The original application documentation and Compose configuration are preserved
 in `README.production-reference.md` and `docker-compose.production-reference.yml`

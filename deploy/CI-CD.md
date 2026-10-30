@@ -15,43 +15,27 @@ development and V2. It performs:
 3. Secret scanning using the existing configuration and historical baseline.
 4. Separate Docker builds for all six images.
 5. Full stack startup with Docker health checks, followed by HTTP smoke tests.
-6. SonarQube static analysis and Python coverage import, waiting for its gate.
 
 Runtime code uses only the Python standard library. Coverage 7.6.1 is the only
 extra test tool installed by CI. Earlier npm, Prisma, pytest, model evaluation
 and Playwright commands were removed because they belonged to the absent real
 application sources. The current checks exercise only the dummy implementation.
 
-## SonarQube setup
-
-Create a project on your SonarQube server, reachable from GitHub hosted runners.
-Under repository Settings, Secrets and variables, Actions, configure:
-
-| Type | Name | Value |
-| --- | --- | --- |
-| Secret | `SONAR_TOKEN` | Project analysis token |
-| Variable | `SONAR_HOST_URL` | HTTPS URL of the server |
-| Variable | `SONAR_PROJECT_KEY` | Existing project key |
-
-The scanner imports `coverage.xml` from the test job and waits up to 600 seconds
-for the server quality gate. Missing settings fail the job. Branch and pull
-request analysis require a server edition supporting them. Fork pull requests
-skip SonarQube because secrets are unavailable. Configure branch protection to
-require the desired checks before merging.
-
-The action and gate configuration follow the [official SonarQube action](https://github.com/SonarSource/sonarqube-scan-action).
-
-## Image delivery
+## AWS image delivery and deployment
 
 After all required checks pass on a push to main, six images are published to
-`ghcr.io/<owner>/<repository>/<service>:<full-commit-sha>`. The path is lowercased.
-Grant Actions access to create packages or write to existing packages. The
-publication job uses its GitHub token with packages write permission.
+`<account>.dkr.ecr.<region>.amazonaws.com/vanika-demo/<service>:<full-commit-sha>`.
+The deploy job waits for all six uploads, then uses Systems Manager Run Command
+to update one EC2 Docker Compose stack and verify every demo HTTP endpoint.
+Other branches and pull requests run checks without deploying.
+
+Configure the EC2 host, ECR repositories and GitHub OIDC role using
+[AWS EC2 setup](AWS-EC2.md). No SonarQube settings or self-hosted runner are
+required. Deployment uses GitHub-hosted Ubuntu runners.
 
 Publication rebuilds the same source revision and Compose settings. Base image
 tags are not digest pinned, so rebuilds are not guaranteed byte identical.
-No running server is updated. Deployment needs a target environment and a
-separate deployment job.
+Workflow runs are queued rather than cancelling an in-flight deployment.
 
 ## Local verification
 

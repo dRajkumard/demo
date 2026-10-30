@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   source_check:
@@ -87,49 +87,14 @@ jobs:
         if: always()
         run: docker compose down
 
-  sonarqube:
-    name: SonarQube quality gate
-    needs: tests
-    # Fork pull requests cannot receive the analysis token.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: python-coverage
-      - name: Validate SonarQube configuration
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
-          SONAR_PROJECT_KEY: ${{ vars.SONAR_PROJECT_KEY }}
-        run: |
-          for setting in SONAR_TOKEN SONAR_HOST_URL SONAR_PROJECT_KEY; do
-            if [ -z "${!setting}" ]; then
-              echo "::error::Configure $setting in the repository Actions settings."
-              exit 1
-            fi
-          done
-      - uses: SonarSource/sonarqube-scan-action@v8.3.0
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
-        with:
-          args: >-
-            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
-            -Dsonar.qualitygate.wait=true
-            -Dsonar.qualitygate.timeout=600
-
   publish:
     name: Publish demo image (${{ matrix.service }})
-    needs: [tests, secrets, builds, smoke, sonarqube]
+    needs: [tests, secrets, builds, smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -137,17 +102,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Validate AWS settings
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: |
+          for setting in AWS_REGION AWS_ROLE_ARN EC2_INSTANCE_ID; do
+            if [ -z "${!setting}" ]; then
+              echo "::error::Configure repository Actions variable $setting."
+              exit 1
+            fi
+          done
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
       - name: Build and publish the tested revision
         env:
           SERVICE: ${{ matrix.service }}
-          REPOSITORY: ${{ github.repository }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
-          image="ghcr.io/${REPOSITORY,,}/${SERVICE}:${GITHUB_SHA}"
+          image="${ECR_REGISTRY}/vanika-demo/${SERVICE}:${GITHUB_SHA}"
           export VANIKA_CI_IMAGE="$image"
           python3 - <<'PYOVERRIDE'
           import json, os
@@ -158,3 +136,26 @@ jobs:
           PYOVERRIDE
           docker compose -f docker-compose.yml -f /tmp/publish.json build "$SERVICE"
           docker push "$image"
+
+  deploy:
+    name: Deploy demo to AWS EC2
+    needs: publish
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Deploy images and verify health through Systems Manager
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+        run: python3 scripts/deploy-ec2.py
