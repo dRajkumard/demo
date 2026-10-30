@@ -1,5 +1,9 @@
 # Deploy the demo to AWS EC2
 
+The current CI workflow deploys through SSH. See [SSH deployment](SSH-EC2.md).
+The OIDC, ECR, and SSM instructions below describe the alternative deployment
+using `scripts/deploy-ec2.py`, which the current workflow does not invoke.
+
 This deploys the six dummy services in `docker-compose.yml`, not the original
 production application. Infrastructure must exist before running the pipeline.
 The workflow does not create or terminate EC2 instances or create IAM roles.

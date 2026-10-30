@@ -87,75 +87,77 @@ jobs:
         if: always()
         run: docker compose down
 
-  publish:
-    name: Publish demo image (${{ matrix.service }})
+  deploy:
+    name: Deploy demo to EC2 through SSH
     needs: [tests, secrets, builds, smoke]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    strategy:
-      fail-fast: false
-      matrix:
-        service: [frontend, gateway-service, srm-service, ai-proxy, sim-worker, ubuntu-sandbox]
+    timeout-minutes: 30
+    concurrency:
+      group: ec2-demo-deployment
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Validate AWS settings
+      - name: Configure SSH
         env:
-          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
-          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
         run: |
-          for setting in AWS_REGION AWS_ROLE_ARN EC2_INSTANCE_ID; do
+          for setting in EC2_HOST EC2_USER EC2_SSH_KEY EC2_KNOWN_HOSTS; do
             if [ -z "${!setting}" ]; then
-              echo "::error::Configure repository Actions variable or secret $setting."
+              echo "::error::Configure repository Actions secret $setting."
               exit 1
             fi
           done
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr
-      - name: Build and publish the tested revision
-        env:
-          SERVICE: ${{ matrix.service }}
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-        run: |
-          image="${ECR_REGISTRY}/vanika-demo/${SERVICE}:${GITHUB_SHA}"
-          export VANIKA_CI_IMAGE="$image"
-          python3 - <<'PYOVERRIDE'
-          import json, os
-          from pathlib import Path
-          Path('/tmp/publish.json').write_text(json.dumps({
-              'services': {os.environ['SERVICE']: {'image': os.environ['VANIKA_CI_IMAGE']}}
-          }))
-          PYOVERRIDE
-          docker compose -f docker-compose.yml -f /tmp/publish.json build "$SERVICE"
-          docker push "$image"
+          install -m 700 -d ~/.ssh
+          umask 077
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          ssh-keygen -y -P '' -f ~/.ssh/deploy_key > /dev/null
 
-  deploy:
-    name: Deploy demo to AWS EC2
-    needs: publish
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr
-      - name: Deploy images and verify health through Systems Manager
+      - name: Deploy tested revision and verify health
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
-        run: python3 scripts/deploy-ec2.py
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=30 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=6 \
+            "${EC2_USER}@${EC2_HOST}" \
+            bash -s -- "$GITHUB_SHA" <<'REMOTE'
+          set -euo pipefail
+          revision="$1"
+          cd "$HOME/vanika/vanika-demo/vanika"
+          exec 9> "$HOME/vanika/vanika-demo/deploy.lock"
+          flock -w 60 9
+
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "Deployment stopped: server checkout has local changes."
+            exit 1
+          fi
+          override="$HOME/vanika/vanika-demo/compose.server.yml"
+          test -f "$override"
+          git fetch origin main
+          git cat-file -e "${revision}^{commit}"
+          git checkout --detach "$revision"
+
+          compose=(sudo -n docker compose -f docker-compose.yml -f "$override")
+          "${compose[@]}" config --quiet
+          if ! "${compose[@]}" up -d --build --wait --wait-timeout 180; then
+            "${compose[@]}" ps
+            "${compose[@]}" logs --tail 100 --no-color
+            exit 1
+          fi
+          "${compose[@]}" ps
+          python3 scripts/smoke-demo.py
+          REMOTE
+
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts
