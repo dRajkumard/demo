@@ -104,20 +104,20 @@ jobs:
       - uses: docker/setup-buildx-action@v3
       - name: Validate AWS settings
         env:
-          AWS_REGION: ${{ vars.AWS_REGION }}
-          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
+          AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
         run: |
           for setting in AWS_REGION AWS_ROLE_ARN EC2_INSTANCE_ID; do
             if [ -z "${!setting}" ]; then
-              echo "::error::Configure repository Actions variable $setting."
+              echo "::error::Configure repository Actions variable or secret $setting."
               exit 1
             fi
           done
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
       - name: Build and publish the tested revision
@@ -150,12 +150,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN || secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || secrets.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
         id: ecr
       - name: Deploy images and verify health through Systems Manager
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID || secrets.EC2_INSTANCE_ID }}
         run: python3 scripts/deploy-ec2.py

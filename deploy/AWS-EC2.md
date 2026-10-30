@@ -69,7 +69,9 @@ and [AWS Run Command walkthrough](https://docs.aws.amazon.com/systems-manager/la
 
 ## 4. Configure repository variables
 
-GitHub repository → Settings → Secrets and variables → Actions → **Variables**:
+GitHub repository → Settings → Secrets and variables → Actions → **Variables**
+(or **Secrets**, if you already store these values there). The workflow accepts
+either, with a nonempty Variable taking precedence over a Secret of the same name:
 
 | Name | Example |
 | --- | --- |
